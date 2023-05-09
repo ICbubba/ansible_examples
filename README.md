@@ -17,7 +17,7 @@ Related Files:
 * Ansible playbook to smoke test external services which are critical to environment build process.
 * Runs any task file that matches `*-test.yml`, processes the result and reports the status of all tests ran.
 * Runs on a schedule and disables builds if any critical service is down and creates a support ticket.
-    * Note: This functionality is not included here, but I thought it was valuable context.
+    * Note: This functionality is not included here, but I thought it was valuable context.  
 Related Files:
 ```
 ./health_validation.yml
