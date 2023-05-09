@@ -1,0 +1,23 @@
+---
+- name: Set ETCD Values
+  ansible.builtin.set_fact:
+    etcd_health_url: "{{ endpoint_vars.etcd_health_url }}"
+
+- name: Gather ETCD Health Status
+  ansible.builtin.uri:
+    url: "{{ etcd_health_url }}"
+    method: GET
+    status_code: 200
+    validate_certs: false
+  retries: "{{ global_retry }}"
+  delay: "{{ global_delay }}"
+  until: etcd_health_results.status == 200
+  ignore_errors: true
+  register: etcd_health_results
+
+- name: Check Health Results
+  include_role:
+    name: gather_health
+  vars:
+    app: etcd
+    health_results: "{{ etcd_health_results }}"

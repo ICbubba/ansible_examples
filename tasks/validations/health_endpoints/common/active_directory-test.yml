@@ -1,0 +1,32 @@
+---
+
+- name: setfact of list of hosts to check
+  ansible.builtin.set_fact:
+      active_directory_health_wip: "{{ endpoint_vars.active_directory_health_wip }}"
+
+- name: debug of hosts in endpoint_vars.active_directory_health_wip
+  ansible.builtin.debug:
+    var: endpoint_vars.active_directory_health_wip
+
+- name: Gather active_directory Health Status
+  wait_for:
+    port: 389
+    host: "{{ active_directory_health_wip }}"
+    timeout: 60
+    connect_timeout: 5
+    delay: 5
+    sleep: 5
+  connection: local
+  ignore_errors: true
+  register: active_directory_health_results
+
+- name: debug of active_directory_health_results
+  ansible.builtin.debug:
+    var: active_directory_health_results
+
+- name: Check Health Results
+  include_role:
+    name: gather_health
+  vars:
+    app: active_directory
+    health_results: "{{ active_directory_health_results }}"
