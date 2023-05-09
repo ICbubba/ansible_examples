@@ -2,7 +2,7 @@
 
 A small collection of example Ansible playbooks/roles/modules
 
-==Please Note: These examples have been taken out of context and are non-functional as they exist in this repository!==
+**Please Note: These examples have been taken out of context and are non-functional as they exist in this repository!**
 
 ### build_vm
 * build_vm.yml is the major functionality of a role which is responsible for building VM infrastructure from image based provisioning to configuration management utilizing Puppeyt and Foreman.  
