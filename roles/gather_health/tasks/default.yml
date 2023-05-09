@@ -1,0 +1,56 @@
+- name: Create Endpoint Summary List
+  ansible.builtin.set_fact:
+    endpoint_summary: []
+  when: endpoint_summary is not defined
+
+- name: debug
+  ansible.builtin.debug:
+    msg: "{{ health_results }}"
+
+- name: "Check Checkpoint Health Results"
+  ansible.builtin.set_fact:
+    state:  "{{ 'SUCCESS' if 'Health check passed' in health_results.stdout else 'FAILED' }}"
+  when:
+    - app == 'checkpoint'
+    - health_results.stdout is defined
+
+- name: "Check {{ app }} HTTP Health Results"
+  ansible.builtin.set_fact:
+    state: "{{ 'SUCCESS' if health_results.status == 200 else 'FAILED' }}"
+  when:
+    - health_results is defined
+    - health_results.status is defined
+
+- name: "Check {{ app }} HTTP Health Results"
+  ansible.builtin.set_fact:
+    state: "{{ 'SUCCESS' if health_results.status in [200,403] else 'FAILED' }}"
+  when:
+    - health_results is defined
+    - health_results.status is defined
+    - app == "jenkins_sle"
+
+- name: "Check {{ app }} PORT Health Results"
+  ansible.builtin.set_fact:
+    state: "{{ 'SUCCESS' if not health_results.failed  else 'FAILED' }}"
+  when:
+    - health_results is defined
+    - health_results.failed is defined
+    - health_results.status is not defined
+
+- name: "Check {{ app }} Health Results"
+  ansible.builtin.debug:
+    msg: "{{ app }} Health Status: {{ state }}"
+  when:
+    - health_results is defined
+    - health_results.status is defined
+
+- name: Update Endpoint Summary List
+  ansible.builtin.set_fact:
+    endpoint_summary: "{{ endpoint_summary + [ app +': ' + state ] }}"
+
+- name: set flag
+  ansible.builtin.set_fact:
+    fail_flag: "failed"
+  when:
+    - state == 'FAILED'
+    - fail_validation

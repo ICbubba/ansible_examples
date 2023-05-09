@@ -1,0 +1,25 @@
+---
+
+- name: Set AWX Values
+  ansible.builtin.set_fact:
+    awx_health_url: "{{ endpoint_vars.awx_health_url }}"
+
+- name: Gather AWX Health Status
+  ansible.builtin.uri:
+    url: "{{ awx_health_url }}"
+    method: GET
+    status_code: 200
+    validate_certs: true
+  retries: "{{ global_retry }}"
+  delay: "{{ global_delay }}"
+  until: awx_health_results.status == 200
+  ignore_errors: yes
+  register: awx_health_results
+
+- name: Check Health Results
+  include_role:
+    name: gather_health
+  vars:
+    app: awx
+    health_results: "{{ awx_health_results }}"
+

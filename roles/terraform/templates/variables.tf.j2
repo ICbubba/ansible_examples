@@ -1,0 +1,64 @@
+variable "user" {
+  default = "{{ openstack_vars.os_username }}"
+}
+
+variable "password" {
+  type = "string"
+  default = "{{ admin_password }}"
+}
+
+variable "project" {
+  type = "string"
+  default = "{{ env }}"
+}
+
+variable "core_name" {
+  type = "string"
+  default = "{{ core_name }}"
+}
+
+variable "auth" {
+  type = "string"
+  default = "{{ openstack_vars.os_auth_url }}"
+}
+
+variable "ost_domain" {
+  type = "string"
+  default = "{{ openstack_vars.os_project_domain }}"
+}
+
+variable "image_name" {
+  type = "string"
+  default = "{{ component_vars.image }}"
+}
+
+
+variable "flavor_id" {
+  type = "string"
+  default = "{{ ost_flavor }}"
+}
+
+variable "network_id" {
+  type = "string"
+  default = "VLAN_{{ vlan_id }}"
+}
+
+variable "private_network_id" {
+  type = "string"
+  default = "{{ private_network_name }}"
+}
+
+variable "componentcount" {
+  type = "string"
+  default = "{{ component_vars.server_count }}"
+}
+
+variable "domain" {
+  type = "string"
+  default = "{{ global_vars.domain }}"
+}
+
+variable "openstack_provider_version" {
+  type = "string"
+  default = "1.32.0"
+}%

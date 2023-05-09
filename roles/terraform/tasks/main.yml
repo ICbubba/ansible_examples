@@ -1,0 +1,41 @@
+---
+
+# ---------------------------------------------------------------------------
+#           First assert all variables passed to this role pass
+#                       testing/validation as needed.
+# ---------------------------------------------------------------------------
+
+- name: "Validate Component Name: {{ component_name }}"
+  assert:
+    that:
+      - component_name | mandatory
+      - component_name is match("^[\w-]+$")
+      - "component_name | length <= 40"
+    msg: "{{ component_name }} failed validation!"
+
+- name: "Validate Application Name: {{ app_name }}"
+  assert:
+    that:
+      - app_name | mandatory
+      - app_name is match("^[\w-]+$")
+      - "app_name | length <= 40"
+    msg: "{{ app_name }} failed validation!"
+
+# ---------------------------------------------------------------------------
+#        All Assertions have passed. Let's move down to role execution
+#
+# ---------------------------------------------------------------------------
+
+- name: "Running Terraform Apply"
+  include_tasks: create.yml
+  vars:
+    application: "{{ app_name }}"
+    component: "{{ component_name }}"
+  when: not destroy
+
+- name: "Running Terraform Destroy"
+  include_tasks: delete.yml
+  vars:
+    application: "{{ app_name }}"
+    component: "{{ component_name }}"
+  when: destroy

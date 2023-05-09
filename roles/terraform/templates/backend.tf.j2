@@ -1,0 +1,8 @@
+terraform {
+  backend "etcd" {
+    path = "environments/{{ env }}/inventory/applications/{{ app_name }}/components/{{ component_name }}/terra_state/terraform.tfstate"
+    endpoints = "{{ etcd_url }}"
+    username = "{{ etcd_user }}"
+    password = "{{ etcd_pass }}"
+  }
+}

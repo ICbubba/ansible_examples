@@ -1,0 +1,219 @@
+---
+
+# ---------------------------------------------------------------------------
+#           First assert all variables passed to this role pass
+#                       testing/validation as needed.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+#        All Assertions have passed. Let's move down to role execution
+#
+# ---------------------------------------------------------------------------
+#
+
+- name: "Create Terraform directory for {{ application }}"
+  file: path={{ tf_app_dir }} state=directory
+
+- name: "Create Terraform directory for {{ component }}"
+  file: path={{ tf_app_dir }}/{{ component }} state=directory
+
+- name: "Ensure Plugins are executable or terraform won't work"
+  command: "find {{ tf_plugin_dir }} -type f -exec chmod 0750 {} \\;"
+
+- name: print username
+  ansible.builtin.debug:
+    msg:
+      - "{{ admin_username }}"
+      - "{{ admin_user_domain }}"
+      - "{{ openstack_vars.os_auth_url }}"
+
+- name: Get Snapshot ID from Openstack
+  get_snapshot_id:
+    snapshot_name: "{{ component_vars.image }}"
+    auth_url: "{{ openstack_vars.os_auth_url }}"
+    username: "{{ admin_username }}"
+    user_domain: "{{ admin_user_domain }}"
+  register: openstack_snapshot_id
+  retries: 3
+  until: openstack_snapshot_id is not failed
+  delay: 30
+
+- name: Get Snapshot Metadata from Openstack
+  get_snapshot_metadata:
+    snapshot_name: "{{ component_vars.image }}"
+    auth_url: "{{ openstack_vars.os_auth_url }}"
+    username: "{{ admin_username }}"
+    user_domain: "{{ admin_user_domain }}"
+  register: openstack_snapshot_metadata
+  retries: 3
+  until: openstack_snapshot_metadata is not failed
+  delay: 30
+
+- name: Terraform creation block
+  block:
+    - debug:
+        msg: "OS Type is: '{{ os_type }}' - grabbing '{{ os_type|default('default') }}' user_data template"
+
+    - name: Generate Terraform user_data files
+      template:
+        src: templates/user_data_{{ os_type }}.j2
+        dest: "{{ tf_comp_dir }}/user_data.tpl"
+        force: true
+
+    - name: Generate Terraform Deploy File
+      template:
+        src: templates/deploy.tf.j2
+        dest: "{{ tf_deploy }}"
+        force: true
+
+    - name: Copy Terraform Provider File to Component Location
+      ansible.builtin.copy:
+        src: "provider.tf"
+        dest: "{{ tf_comp_dir }}"
+        force: true
+
+    - name: Generate/Copy Terraform Variables File to Component Location
+      template:
+        src: templates/variables.tf.j2
+        dest: "{{ tf_vars }}"
+        force: true
+
+    - name: Generate/Copy Terraform Backend File to Component Location
+      template:
+        src: templates/backend.tf.j2
+        dest: "{{ tf_backend }}"
+        force: true
+
+    - name: Block for Terraform Init
+      block:
+        - name: Terraform Init
+          command: "{{ tf_bin }} init -get=true -force-copy -input=false -get-plugins=false -plugin-dir={{ tf_plugin_dir }}"
+          register: _tf_init_state
+          changed_when: false
+          args:
+            chdir: "{{ tf_comp_dir }}"
+      rescue:
+        - name: "Clear ansible_failed_task for terraform init"
+          ansible.builtin.set_fact:
+            ansible_failed_task:
+
+        - name: delay before restarting terraform init
+          pause:
+            seconds: 30
+
+        - name: Terraform Init Rescue to handle transient failures
+          command: "{{ tf_bin }} init -get=true -force-copy -input=false -get-plugins=false -plugin-dir={{ tf_plugin_dir }}"
+          register: _tf_init_state
+          changed_when: false
+          args:
+            chdir: "{{ tf_comp_dir }}"
+
+
+    # Creating too many things in parallel screws up openstack badly
+    # Add in a random delay here so parallel create tasks are far less likely to kick off
+    # at the exact same time. Make it overrideable at a role level.
+    - name: Create random delay number
+      ansible.builtin.set_fact:
+        terraform_delay: "{{ 120 | random }}"
+      when:
+        - buildtool_random_delay
+
+    # Pause for random seconds
+    - pause:
+        seconds: "{{ terraform_delay }}"
+      when:
+        - buildtool_random_delay
+        - terraform_delay is defined
+
+    - name: Debug Terraform Init
+      ansible.builtin.debug:
+        var: _tf_init_state
+        verbosity: 2
+
+    - name: Block for Terraform Apply and result
+      block:
+        - name: Terraform Plan
+          command: "{{ tf_bin }} plan -out={{ tf_plan }} -input=false -detailed-exitcode"
+          register: _tf_plan
+          changed_when: false
+          args:
+            chdir: "{{ tf_comp_dir }}"
+          failed_when: _tf_plan['rc'] > 2 or _tf_plan['rc'] == 1
+
+        - name: Debug Run Terraform Plan
+          ansible.builtin.debug:
+            var: _tf_plan
+            verbosity: 2
+      rescue:
+        - name: "Clear ansible_failed_task for terraform plan"
+          ansible.builtin.set_fact:
+            ansible_failed_task:
+
+        - name: delay before restarting terraform plan
+          pause:
+            seconds: 30
+
+        - name: Terraform Plan to handle transient failures
+          command: "{{ tf_bin }} plan -out={{ tf_plan }} -input=false -detailed-exitcode"
+          register: _tf_plan
+          changed_when: false
+          args:
+            chdir: "{{ tf_comp_dir }}"
+          failed_when: _tf_plan['rc'] > 2 or _tf_plan['rc'] == 1
+
+        - name: Debug Run Terraform Plan during retry for transient failures
+          ansible.builtin.debug:
+            var: _tf_plan
+            verbosity: 2
+
+    - name: Block for Terraform Apply and result
+      block:
+        - name: Terraform Apply
+          command: "{{ tf_bin }} apply -input=false -auto-approve=true -parallelism=10"
+          environment:
+            TF_LOG: DEBUG
+          register: _tf_apply
+          changed_when: false
+          args:
+            chdir: "{{ tf_comp_dir }}"
+          when: _tf_plan['rc'] == 2
+
+        - name: Debug Apply Terraform Plan
+          ansible.builtin.debug:
+            var: _tf_apply
+            verbosity: 2
+      rescue:
+        - name: "Clear ansible_failed_task for terraform apply"
+          ansible.builtin.set_fact:
+            ansible_failed_task:
+
+        - name: delay before restarting terraform apply
+          pause:
+            seconds: 30
+
+        - name: Terraform Apply to handle transient failures
+          command: "{{ tf_bin }} apply -input=false -auto-approve=true -parallelism=10"
+          environment:
+            TF_LOG: DEBUG
+          register: _tf_apply
+          changed_when: false
+          args:
+            chdir: "{{ tf_comp_dir }}"
+          when: _tf_plan['rc'] == 2
+
+        - name: Debug Apply Terraform error handler Plan
+          ansible.builtin.debug:
+            var: _tf_apply
+            verbosity: 2
+  always:
+    - name: ensure user data is removed
+      ansible.builtin.file:
+        path: "{{ tf_comp_dir }}/user_data.tpl"
+        state: absent
+    - name: print caught failure
+      fail:
+        msg: "Ansible task '{{ ansible_failed_task.name }}' failed: {{ ansible_failed_result }}"
+      when:
+        - ansible_failed_task is defined
+        - ansible_failed_task != None
+

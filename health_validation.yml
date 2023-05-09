@@ -1,0 +1,180 @@
+---
+- hosts: localhost
+  gather_facts: false
+  vars:
+    etcd_url: "{{ lookup('env', 'ANSIBLE_ETCD_URL') }}"
+    etcd_version: "{{ lookup('env', 'ANSIBLE_ETCD_VERSION') }}"
+    global_retry: 2
+    global_delay: 10
+  tasks:
+
+    - name: "set initial fail_flag"
+      ansible.builtin.set_fact:
+        fail_flag: ''
+
+    - name: Global Configuration
+      include_tasks: tasks/global_config.yml
+
+    - name: initalize skip_run flag
+      ansible.builtin.set_fact:
+        skip_run: False
+
+    - name: Check if we are a part of a schedule
+      block:
+        - name: get current awx instance
+          ansible.builtin.set_fact:
+            awx_instance: "{{ lookup('ansible.builtin.env', 'AWX_HOST') }}"
+
+        - name: Missing awx_instance block
+          block:
+            - name: missing awx_instance
+              ansible.builtin.debug:
+                msg: "Unable to determine current AWX instance - continuing validation"
+
+            - name: "clear awx_schedule_name if we cant find 'AWX_HOST'"
+              ansible.builtin.set_fact:
+                awx_schedule_name: ''
+          when: awx_instance |default() |length == 0
+
+        - name: check for currently running schedules
+          ansible.builtin.uri:
+            url: "{{ awx_instance }}/api/v2/jobs?{{ query | urlencode }}"
+            method: GET
+            user: "{{ global_vars.awx_api_user }}"
+            password: "{{ lookup('hashi_vault', 'secret=secret/data/mysecret namespace=mynamespace')[global_vars.awx_api_user] }}"
+            force_basic_auth: true
+          vars:
+            query:
+              status__in: "pending,running,waiting"
+              schedule__name: "{{ awx_schedule_name }}"
+              not__id: "{{ awx_job_id }}"
+          register: running_jobs
+
+        - name: Grab current number of running scheduled jobs
+          ansible.builtin.set_fact:
+            total_running: "{{ running_jobs.json['count']|default(0) }}"
+
+        - name: running jobs block
+          block:
+            - name: set skip_run flag to True
+              ansible.builtin.set_fact:
+                skip_run: True
+
+            - name: skip run message
+              ansible.builtin.debug:
+                msg: "SKIPPING: There are currently {{ total_running }} running job(s) for schedule: {{ awx_schedule_name }}."
+
+            - name: ending play due to currently running validation
+              meta: end_play
+          when: total_running|int > 0
+
+        - name: continue run
+          ansible.builtin.debug:
+            msg: "Starting validation as there are no current running jobs for schedule: {{ awx_schedule_name }}"
+      when: awx_schedule_name|default()|length > 0
+
+## Start Endpoint Validation Section ##
+
+    # Create a dictionary to map what tests should fail the overall validation
+    # Enable all tests by default.  Individual tests will set themselves to false when needed.
+    - name: Gather List of Tests
+      find:
+        paths:
+          - "tasks/validations/"
+        file_type: file
+        patterns: "*-test.yml"
+        recurse: true
+      register: gathered_tests
+
+    - name: Create Dictionary of Tests and Test Paths
+      ansible.builtin.set_fact:
+        test_paths: "{{ test_paths | default({})|combine({ test: test_path }) }}"
+      loop: "{{ gathered_tests.files }}"
+      loop_control:
+        loop_var: test_entry
+      vars:
+        test: "{{ (test_entry.path| basename | splitext)[0] }}"
+        test_path: "{{ test_entry.path }}"
+
+    - name: Create dictionary to determine which tests will fail overall validation
+      ansible.builtin.set_fact:
+        test_map: "{{ test_map|default({}) | combine({ test: 'true' }) }}"
+      with_dict: "{{ test_paths }}"
+      vars:
+        test: "{{ item.key }}"
+
+    - name: Call Tests
+      include: "{{ test_file }}"
+      with_dict: "{{ test_paths }}"
+      loop_control:
+        loop_var: test
+      vars:
+        test_name: "{{ test.key }}"
+        test_file: "{{ test.value }}"
+
+## End Endpoint Validation Section ##
+
+
+## Start Playbook Validation Section ##
+
+  # Start DB Validation Steps
+    - name: Get list of Oracle Databases
+      include_tasks: tasks/validations/oracle/gather_dbs.yml
+
+    - name: Add db_validations to test_map
+      ansible.builtin.set_fact:
+        test_map: "{{ test_map|default({}) | combine({ 'oracle_db': 'true' }, recursive=True) }}"
+      with_dict: "{{ test_map }}"
+
+  # Start new play for DB validations
+- name: Run Database Validations
+  import_playbook: tasks/validations/oracle/oracle_db.yml
+
+
+## End Playbook Validation Steps ##
+
+
+## Start Test Reporting Section ##
+
+# Start new play for reporting test results
+- hosts: localhost
+  gather_facts: false
+  vars:
+    etcd_url: "{{ lookup('env', 'ANSIBLE_ETCD_URL') }}"
+    etcd_version: "{{ lookup('env', 'ANSIBLE_ETCD_VERSION') }}"
+  tasks:
+
+    # DO NOT REMOVE: required for each PLAY
+    - name: SKIP RUN
+      meta: end_play
+      when: hostvars['localhost']['skip_run']|default(False)
+
+    - name: "Check Health Results: Oracle DB"
+      include_role:
+        name: gather_health
+      vars:
+        app: oracle_db
+        gather_task: oracle_db
+        test_name: oracle_db
+
+    - name: Print DB listener Summary
+      ansible.builtin.debug:
+        msg: "{{ db_health_summary }}"
+
+
+    - name: Print Endpoint Summary
+      ansible.builtin.debug:
+        msg: "{{ endpoint_summary }}"
+
+## End Test Reporting Section ##
+
+
+## Start Fail Validation Section ##
+
+
+    # Fail job if any test fails
+    - name: Fail Overall Validation
+      fail: msg="Validation failed"
+      when:
+        - fail_flag is defined
+        - fail_flag == "failed"

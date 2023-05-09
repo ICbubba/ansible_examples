@@ -1,0 +1,90 @@
+{# Here we loop through and create a resource definition for each server #}
+{% for instance in all_servers %}
+{% set server_index = loop.index -%}
+# ----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+#
+# Create our Instance Number: {{ server_index }}
+#
+# ----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+
+resource "openstack_compute_instance_v2" "instance-{{ app_name }}-{{ component }}-{{ server_index }}" {
+  name = "{{ instance }}"
+  flavor_name = var.flavor_id
+{% if component_vars.network_zone == '3' %}
+  security_groups = ["{{ app_name }}_{{ env }}_z3"]
+{% else %}
+  security_groups = ["default", "${var.project}-any_any"]
+{% endif %}
+  network {
+    name = var.network_id
+  }
+  stop_before_destroy = true
+  force_delete = true
+
+  block_device {
+    uuid                  = "{{ openstack_snapshot_id.id }}"
+    source_type           = "snapshot"
+    volume_size           = 100
+    boot_index            = 0
+    destination_type      = "volume"
+    delete_on_termination = true
+  }
+  user_data = templatefile("${path.module}/user_data.tpl", {instance = "{{ instance }}"})
+
+  # Append our Image ID derived from our snapshot to the MetaData list - so it works.
+  metadata = {
+    {{ openstack_metadata + '\n' + '    IMAGE_ID = "' + (openstack_snapshot_metadata.metadata.IMAGE_ID | default('UNKNOWN', true)) + '"' }}
+  }
+
+  timeouts {
+    create = "60m"
+    delete = "60m"
+  }
+}
+
+
+{# PreviousDisk variable is used for terraforms depends_on parameter #}
+{% set previousdisk = '' -%}
+
+{# additional disks is an array of hashes but is NOT ordered by index due to ETCD Fun #}
+{# Must Use Jinja2 template function sort by index to ensure disks are added in order #}
+{# Without this order - the OS sees them in "random order" #}
+{% for diskinfo in additional_disks|sort(attribute='index')|default([]) %}
+{% set disk_index = loop.index -%}
+{% set previous_index = loop.index - 1 -%}
+# ----------------------------------------------------------------------------
+# Create and add additional disk: {{ disk_index }}
+# ----------------------------------------------------------------------------
+resource "openstack_blockstorage_volume_v2" "volume-{{ app_name }}-{{ component }}-{{ server_index }}-{{ disk_index }}" {
+  name = "{{ instance }}-vol-${format("%03d", {{ disk_index }} )}"
+  size = {{ diskinfo.size }}
+  volume_type = "default"
+  description = "Volume #${format("%03d", {{ disk_index }} )} attached to: {{ instance }}"
+  # Re-enable this when we can use v3 resources with the newer terraform plugin
+  # enable_online_resize = true
+
+  timeouts {
+    create = "60m"
+    delete = "60m"
+  }
+}
+
+resource "openstack_compute_volume_attach_v2" "attachment-{{ app_name }}-{{ component }}-{{ server_index }}-{{ disk_index }}" {
+  instance_id = "${openstack_compute_instance_v2.instance-{{ app_name }}-{{ component }}-{{ server_index }}.id}"
+  volume_id = "${openstack_blockstorage_volume_v2.volume-{{ app_name }}-{{ component }}-{{ server_index }}-{{ disk_index }}.id}"
+  {% if disk_index > 1  %}
+  {% set previousdisk = "openstack_compute_volume_attach_v2.attachment-" + app_name + "-" + component + "-" ~ server_index + "-" ~ previous_index -%}
+  depends_on = ["{{ previousdisk }}"]
+  {% endif %}
+
+  timeouts {
+    create = "60m"
+    delete = "60m"
+  }
+}
+{% endfor %}
+{% endfor %}

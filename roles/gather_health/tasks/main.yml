@@ -1,0 +1,19 @@
+---
+
+- name: Determine if test should fail playbook or not
+  ansible.builtin.set_fact:
+    fail_validation: "{{ test_map[test_name] }}"
+
+- name: "Calling {{ app }} specific gather_health"
+  include_tasks: "{{ task_file }}"
+  vars:
+    include_files:
+      - "{{ gather_task }}.yml"
+      - default.yml
+  loop: "{{ query('first_found', include_files) }}"
+  loop_control:
+    loop_var: task_file
+  when:
+    - gather_task is defined
+    - gather_task != ""
+

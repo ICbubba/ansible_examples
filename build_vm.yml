@@ -1,0 +1,312 @@
+---
+  # Correct an issue with all_servers if we call this more than once per playbook
+  # Set it to "" here - cannot "unset" a set fact in ansible
+  - ansible.builtin.set_fact:
+      all_servers: ""
+
+  # Create etcd inventory structure for component: {{ component_name }} for application: {{ app_name }}"
+  - name: "Create etcd inventory structure for component: {{ component_name }} for application: {{ app_name }}"
+    etcd_dir:
+      etcd_fqdn: "{{ etcd_fqdn }}"
+      dir_path: "/environments/{{ env }}/inventory/applications/{{ app_name }}/components/{{ component_name }}/servers"
+      username: "{{ global_vars.awx_etcd_username }}"
+      action: create
+
+  - name: "etcd lookup of component data for buildout of component: {{ component_name }} for application: {{ app_name }}"
+    ansible.builtin.set_fact:
+      component_vars: "{{ lookup('etcd','/environments/{{ env }}/manifests/applications/{{ app_name }}/components/{{ component_name }}/servers') }}"
+    until: component_vars != ""
+    retries: 30
+    delay: 3
+    register: etcdlookupvalidate
+
+  # DEBUG our etcdlookupvalidate info
+  - name: "DEBUG our etcdlookupvalidate info"
+    ansible.builtin.debug:
+      var: etcdlookupvalidate
+      verbosity: 2
+    when:
+      - etcdlookupvalidate is defined
+
+  # DEBUG our component_vars info
+  - name: "DEBUG our component_vars info"
+    ansible.builtin.debug:
+      var: component_vars
+      verbosity: 2
+    when:
+      - component_vars is defined
+
+  - name: "etcd lookup of network_vars {{ component_vars.network_zone }} manifest data for buildout of component: {{ component_name }} for application: {{ app_name }}"
+    ansible.builtin.set_fact:
+      network_vars: "{{ lookup('etcd', '/environments/{{ env }}/manifests/network_zones/{{ component_vars.network_zone }}') }}"
+
+  # DEBUG our network_vars info
+  - name: "DEBUG our network_vars info"
+    ansible.builtin.debug:
+      var: network_vars
+      verbosity: 2
+    when:
+      - network_vars is defined
+
+  - name: "Zone 3 Specific tasks"
+    block:
+      - name: lookup vio information
+        ansible.builtin.set_fact:
+          vio_info: "{{ lookup('etcd', 'datacenter_services/local/{{ datacenter }}/openstack') }}"
+
+      - name: Set admin user for vault lookup
+        ansible.builtin.set_fact:
+          vio_admin_username: "{{ vio_info.os_username | regex_replace('@is.dev.com') }}"
+
+      - name: "Create Security Group for {{ app_name }}"
+        create_security_group:
+          auth_url: "{{ vio_info.os_auth_url }}"
+          project_name: "{{ env }}"
+          username: "{{ vio_info.os_username }}"
+          password: "{{ lookup('hashi_vault', 'secret=mysecret') }}"
+          datacenter: "{{ datacenter }}"
+          security_group: "{{ app_name }}_{{ env }}_z3"
+          rule_networks: "{{ lookup('template', '{{ role_path }}/templates/z3_networks.yml') | from_yaml | to_json }}"
+          etcd_fqdn: "{{ etcd_url | urlsplit('hostname') }}"
+        vars:
+          vlt_suffix: "{{ ':data' if ansible_version.full is version('2.10.0', '<') else none }}"
+    when:
+      - component_vars.network_zone is defined
+      - component_vars.network_zone == '3'
+
+  - name: "etcd lookup of foreman inventory items (foreman_inv)"
+    ansible.builtin.set_fact:
+      foreman_inv: "{{ lookup('etcd', '/environments/{{ core_name }}/inventory/foreman') }}"
+
+  - name: "etcd lookup vlan_id"
+    ansible.builtin.set_fact:
+      vlan_id: "{{ network_vars.vlan }}"
+    when: component_vars.network_zone is defined
+
+  - name: "Determine foreman subnet, env, org IDs"
+    ansible.builtin.set_fact:
+      foreman_subnet_id: "{{ lookup('etcd', '/environments/{{ core_name }}/inventory/foreman/subnets/VLAN_{{ vlan_id }}_ID') }}"
+      foreman_env_id: "{{ lookup('etcd', '/environments/{{ env }}/inventory/foreman/environment_id') }}"
+      foreman_org_id: "{{ lookup('etcd', '/environments/{{ env }}/inventory/foreman/organization_id') }}"
+
+  - name: Set Foreman Environment
+    ansible.builtin.set_fact:
+      my_environment: "{{ core_name }}{{ env_suffix }}"
+    vars:
+      env_suffix: "{{ 'sat' if satellite|bool else none }}"
+
+  - name: "Get Credential info from Vault"
+    ansible.builtin.set_fact:
+      domain_join_password: "{{ lookup('hashi_vault', 'secret=mysecret') }}"
+    vars:
+      vlt_suffix: "{{ ':data' if ansible_version.full is version('2.10.0', '<') else none }}"
+    no_log: true
+
+  - name: "Set base variables needed for Server Build"
+    ansible.builtin.set_fact:
+      ost_flavor: "c{{ component_vars.cpu }}.m{{ component_vars.memory }}"
+      buildtool: "{{ buildtool | default('terraform') }}"
+      build_params:
+        architecture_id: "{{ component_vars.architecture_id }}"
+        operatingsystem_id: "{{ component_vars.operatingsystem_id }}"
+        environment: "{{ my_environment }}"
+        environment_id: "{{ foreman_env_id }}"
+        organization_id: "{{ foreman_org_id }}"
+        hostgroup: "{{ component_vars.rbac_hostgroup }}"
+        nodestatus: "{{ global_vars.nodestatus }}"
+        builder: "{{ global_vars.builder }}"
+        buildCHG: "{{ global_vars.buildchg }}"
+        foreman_url: "{{ global_vars.foreman_url }}"
+        location: "{{ datacenter }}/zone{{ component_vars.network_zone }}"
+        hostgroup: "{{ component_vars.foreman_hostgroup }}"
+        domain_join_domain: "{{ global_vars.domain }}"
+        tan: "{{ component_vars.tan }}"
+        tidal: "{{ component_vars.tidal | default('no') }}"
+        multi: "{{ component_vars.multi }}"
+        cis: "{{ component_vars.cis | default('yes') }}"
+        primarynicdata: "{{ component_vars.primarynicdata + ';subnet_id:'+ foreman_subnet_id|string }}"
+        _partition_snippet: "{{ component_vars.disk_config }}"
+        _puppetca: "{{ global_vars.puppetca }}"
+        _puppetmaster: "{{ global_vars.puppet_master }}"
+        puppet_ca_proxy_id: "{{ global_vars.puppet_proxy_id }}"
+        ETCDURL: "{{ etcd_url }}/v2/keys"
+        satellite_key: "{{ satellite_key }}"
+        core_name: "{{ core_name }}"
+        machineobjectou: "{{ global_vars.domain_join_ou }}"
+
+  # DEBUG our build_params
+  - name: "DEBUG our build_params info"
+    ansible.builtin.debug:
+      var: build_params
+      verbosity: 2
+    when:
+      - build_params is defined
+
+  - name: "Lookup existing hostnames in etcd  for component: {{ component_name }} for application: {{ app_name }}"
+    ansible.builtin.set_fact:
+      existing_servers: "{{ lookup('etcd', '/environments/{{ env }}/inventory/applications/{{ app_name }}/components/{{ component_name }}/servers') }}"
+
+  - name: "Determine pre-existing hostname count for component: {{ component_name }} for application: {{ app_name }}"
+    ansible.builtin.set_fact:
+      existing_servers_count: "{{ existing_servers | length }}"
+
+  - block:
+      - name: "Get build order for server creation from state file"
+        get_build_order:
+          app_name: "{{ app_name }}"
+          component_name: "{{ component_name }}"
+          environment: "{{ env }}"
+          server_count: "{{ component_vars.server_count }}"
+          source: terra_state
+          resource_type: openstack_compute_instance_v2
+          etcd_url: "{{ etcd_url }}"
+        register: sorted_servers
+    rescue:
+      - name: "Get build order for server creation from etcd"
+        get_build_order:
+          app_name: "{{ app_name }}"
+          component_name: "{{ component_name }}"
+          environment: "{{ env }}"
+          server_count: "{{ component_vars.server_count }}"
+          source: etcd_inventory
+          etcd_url: "{{ etcd_url }}"
+        register: sorted_servers
+
+  - name: Generate The Server's FQDN suffix
+    generatefqdn:
+      server_count: "{{ sorted_servers.servers_required }}"
+      domain: "{{ global_vars.domain }}"
+      app_code: "{{ component_vars.app_code }}"
+      env: "{{ core_name }}"
+    register: servers
+    when: sorted_servers.servers_required > 0
+
+  - name: "set a list of all servers"
+    ansible.builtin.set_fact:
+      all_servers: "{{ sorted_servers.build_order|default([])  + servers.fqdns|default([]) }}"
+
+  # Get Disk Layout
+  - name: "Get Disk Layout Disk Config: {{ component_vars.disk_config }}"
+    ansible.builtin.set_fact:
+      disk_layout: "{{ lookup('etcd', '/provisioning/disk/{{ component_vars.disk_config }}') }}"
+      additional_disks: []
+
+  # Output Results
+  - name: Write Disk Array fact for later use
+    ansible.builtin.set_fact:
+      additional_disks: "{{ additional_disks | default([]) + [ {'index': item | int, 'size': disk_layout[item | string].size} ] }}"
+    loop: "{{ disk_layout | reject('search', 'OS Drive') | list }}"
+    when:
+      - item != '0'
+      - disk_layout[item].filesystem in ['xfs', 'ntfs']
+
+  - name: "Begin Compiling needed key->value pairs string for Openstack Metadata Service TERRAFORM"
+    ansible.builtin.set_fact:
+      openstack_metadata_tmp: "{{ openstack_metadata_tmp |default([]) + [metadata_terraform_item.key+' = '+'\"'+(metadata_terraform_item.value )+'\"'] |list }}"
+    with_dict: "{{ build_params }}"
+    loop_control:
+      loop_var: metadata_terraform_item
+    when: buildtool == "terraform"
+
+  - name: "Complete Compiling needed key->value pairs string for Openstack Metadata Service"
+    ansible.builtin.set_fact:
+      openstack_metadata: "{{ openstack_metadata_tmp | join('\n') }}"
+
+  # debug
+  - name: debug
+    ansible.builtin.debug:
+      msg:
+        - "existing_servers_count: {{ existing_servers_count }}"
+        - "total server count: {{ all_servers|length }}"
+        - "destroy: {{ destroy }}"
+      verbosity: 2
+
+  # User Terraform or Ansible based on the buildtool variable
+  - name: "Call buildtool: {{ buildtool }}"
+    include_role:
+      name: "{{ buildtool }}"
+    vars:
+      buildtool_random_delay: "{{ provision_random_delay }}"
+      os_type: "{% if (build_params.hostgroup|lower).startswith('win') %}windows{% else %}linux{% endif %}"
+    when: existing_servers_count|int < all_servers|length|int
+
+  # DEBUG our all_servers
+  - name: "DEBUG our all_servers info"
+    ansible.builtin.debug:
+      var: "{{ all_servers | default([]) }}"
+      verbosity: 2
+    when:
+      - all_servers is defined
+      - all_servers | length > 0
+
+  # Write our Server Names back to ETCD for future use.
+  - name: Write Server Names and data back to ETCD
+    include_tasks: common/server_inventory.yml
+    loop: "{{ all_servers | default([], true) }}"
+    loop_control:
+      loop_var: server_name
+    when:
+      - all_servers is defined
+      - all_servers | length > 0
+
+  # When all_servers is NOT populated - all servers were already created
+  # Set all_servers to existing_servers so the below continues
+  - name: "No servers created by terraform"
+    ansible.builtin.set_fact:
+      all_servers: "{{ existing_servers }}"
+    when: all_servers is not defined or all_servers == ""
+
+  - name: "DEBUG: All Servers"
+    ansible.builtin.debug:
+      var: all_servers
+      verbosity: 2
+    when:
+      - all_servers is defined
+      - all_servers != ""
+
+  - name: Pull in generated and validated Component FQDN's from ETCD Inventory.
+    ansible.builtin.set_fact:
+      valid_server_names: "{{ check_for_hosts | default('Could not pull servers from etcd') }}"
+    until: check_for_hosts | length > 0
+    retries: 5
+    vars:
+      check_for_hosts: "{{ lookup('etcd', '/environments/{{ env }}/inventory/applications/{{ app_name }}/components/{{ component_name }}/servers') }}"
+
+  - name: Create Foreman Host Objects
+    include_role:
+      name: foreman_host
+    vars:
+      fqdn: "{{ server_create }}"
+      foreman_url: "{{ global_vars.foreman_url }}"
+      foreman_username: "{{ global_vars.foreman_username }}"
+    with_items: "{{ valid_server_names }}"
+    loop_control:
+      loop_var: server_create
+    register: host_create
+
+
+  - name: Add hosts to various of inventory groups
+    include_tasks: create/inventory_groups.yml
+
+  - name: "Update ItemsDB if appd is required"
+    include_role:
+      name: install_appd
+    loop: "{{ all_servers }}"
+    vars:
+      hostname: "{{ server }}"
+      mon_env: "{{ my__environment }}"
+      os_type: "{% if (build_params.hostgroup|lower).startswith('win') %}windows{% else %}linux{% endif %}"
+    loop_control:
+      loop_var: server
+    when:
+      - component_vars.appd_required|default('false')|bool
+      - all_servers | default([]) | length > 0
+
+  - name: "Create Firewall Groups if they exist"
+    include_role:
+      name: modify_firewall_host
+    vars:
+      zone: "{{ component_vars.network_zone }}"
+    when:
+      - component_vars
+      - component_vars.network_zone

@@ -1,0 +1,112 @@
+---
+
+# ---------------------------------------------------------------------------
+#           First assert all variables passed to this role pass
+#                       testing/validation as needed.
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+#        All Assertions have passed. Let's move down to role execution
+#
+# ---------------------------------------------------------------------------
+
+- name: "Create Terraform directory for {{ app_name }}"
+  file: path={{ tf_app_dir }} state=directory
+
+- name: "Create Terraform directory for {{ component }}"
+  file: path={{ tf_app_dir }}/{{ component }} state=directory
+
+- name: "Ensure Plugins are executable or terraform won't work"
+  command: "find {{ tf_plugin_dir }} -type f -exec chmod 0750 {} \\;"
+
+- name: Copy Terraform Provider File to Component Location
+  ansible.builtin.copy:
+    src: "provider.tf"
+    dest: "{{ tf_comp_dir }}"
+    force: true
+
+- name: Generate/Copy Terraform Variables File to Component Location
+  template:
+    src: templates/variables.tf.j2
+    dest: "{{ tf_vars }}"
+    force: true
+
+- name: Generate/Copy Terraform Backend File to Component Location
+  template:
+    src: templates/backend.tf.j2
+    dest: "{{ tf_backend }}"
+    force: true
+
+
+- name: Generate Terraform default user_data file
+  template:
+    src: templates/user_data_default.j2
+    dest: "{{ tf_comp_dir }}/user_data.tpl"
+    force: true
+
+- block:
+    - name: Terraform Init
+      command: "{{ tf_bin }} init -get=true -force-copy -input=false -get-plugins=false -plugin-dir={{ tf_plugin_dir }}"
+      register: _tf_init_state
+      changed_when: false
+      args:
+        chdir: "{{ tf_comp_dir }}"
+  rescue:
+    - name: Retry Terraform Init after provider update
+      command: "{{ tf_bin }} init -get=true -force-copy -input=false -get-plugins=false -plugin-dir={{ tf_plugin_dir }}"
+      register: _tf_init_state
+      changed_when: false
+      args:
+        chdir: "{{ tf_comp_dir }}"
+
+# Deleting too many things in parallel screws up openstack badly
+# Add in a random delay here so parallel delete tasks are far less likely to kick off
+# at the exact same time. Make it overrideable at a role level.
+- name: Create random delay number
+  ansible.builtin.set_fact:
+    terraform_delay: "{{ 120 | random }}"
+  when:
+    - buildtool_random_delay
+
+# Pause for random seconds
+- pause:
+    seconds: "{{ terraform_delay }}"
+  when:
+    - buildtool_random_delay
+    - terraform_delay is defined
+
+- name: Debug Terraform Init
+  ansible.builtin.debug:
+    var: _tf_init_state
+    verbosity: 2
+  when: _tf_init_state.rc > 0
+
+- name: Block for Terraform Destroy and result
+  block:
+  - name: Destroy Terraform Infrastructure
+    command: "{{ tf_bin }} destroy -force"
+    environment:
+      TF_LOG: TRACE
+    register: _tf_destroy
+    args:
+      chdir: "{{ tf_comp_dir }}"
+
+  - name: Debug Terraform Destroy Infrastructure
+    ansible.builtin.debug:
+      msg: "{{ _tf_destroy }}"
+      verbosity: 2
+  rescue:
+  - name: Destroy Terraform Infrastructure to handle transient failures
+    command: "{{ tf_bin }} destroy -force"
+    environment:
+      TF_LOG: TRACE
+    register: _tf_destroy
+    args:
+      chdir: "{{ tf_comp_dir }}"
+
+  - name: Debug Terraform Destroy Infrastructure to handle transient failures
+    ansible.builtin.debug:
+      msg: "{{ _tf_destroy }}"
+      verbosity: 2
+
